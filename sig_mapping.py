@@ -1,278 +1,368 @@
-import tkinter as tk
-from tkinterdnd2 import DND_TEXT, TkinterDnD
-from tkinter import ttk, filedialog
+import sys
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
+    QFrame, QPushButton, QTextEdit, QCheckBox, QLineEdit, QFileDialog,
+    QTabWidget, QWidget, QGroupBox, QGridLayout, QSizePolicy, QScrollArea, QMessageBox
+)
+from PyQt5.QtCore import Qt, QMimeData
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QDrag
 import configparser
+import argparse
+import os
+import logging
+
+# 初始化日志
+logging.basicConfig(
+    filename='app.log',
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 original_prefix_entry_default = "harness.U_DUT.XXX.SUB"
 target_prefix_entry_default = "harness.U_DUT.HARDENED_TOP.XXX.SUB"
 
-class SignalDragMode(ttk.Frame):
-    def __init__(self, parent):
+# 添加在类顶部
+SIGNAL_DRAG_MODE = '信号拖拽模式'
+WAVEFORM_MODE = '波形模式'
+
+class SignalDragLabel(QLabel):
+    def __init__(self, title, parent=None, is_drag_out=False):
+        super().__init__(title, parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("""
+            QLabel {
+                background-color: lightgray; 
+                border: 2px dashed black;
+                font-size: 14px;
+                padding: 10px;
+                width: 200px;
+            }
+            QLabel:hover {
+                background-color: #d3d3d3;
+            }
+        """)
+        self.setAcceptDrops(True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.is_drag_out = is_drag_out
+        self.drag_text = ""  # 初始化拖动文本
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if self.is_drag_out:
+            # 拒绝拖入操作，并显示禁止光标
+            event.ignore()
+        elif event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        if not self.is_drag_out:
+            text = event.mimeData().text()
+            self.parent().handle_drop(text, self)
+            event.acceptProposedAction()
+        else:
+            # 拒绝拖入操作
+            event.ignore()
+
+    def mousePressEvent(self, event):
+        if self.is_drag_out and self.drag_text:
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            mime_data.setText(self.drag_text)
+            drag.setMimeData(mime_data)
+
+            # 开始拖动操作
+            drop_action = drag.exec_(Qt.CopyAction | Qt.MoveAction)
+
+    def set_drag_text(self, text):
+        if self.is_drag_out:
+            self.drag_text = text
+        # self.setText(text)
+
+class SignalDragMode(QWidget):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent  # 保存对父窗口的引用
+        self.parent = parent
+        self.processed_result = ""  # 初始化处理结果
         self.create_widgets()
 
     def create_widgets(self):
-        tk.Label(self, text="本模式支持将前仿verdi中的信号拖入，并转换输出为后仿verdi中的信号").pack()
+        layout = QVBoxLayout(self)
 
-        drop_frame = ttk.Frame(self)
-        drop_frame.pack(pady=10, padx=10, fill='x')
+        instruction_label = QLabel(f"{SIGNAL_DRAG_MODE}：如果前后仿波形已经打开，将前仿信号拖入，经转换后再拖入后仿波形")
+        instruction_label.setWordWrap(True)
+        # 统一样式并增加 padding
+        instruction_label.setStyleSheet("""
+            QLabel {
+                font-weight: bold;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(instruction_label)
 
-        self.drop_label = tk.Label(drop_frame, text="将前仿verdi中的信号拖拽到这里", width=40, height=13, relief="groove", bg="lightgray")
-        self.drop_label.pack(fill='x')
-        self.drop_label.drop_target_register(DND_TEXT)
-        self.drop_label.dnd_bind('<<Drop>>', self.drop)
+        drag_layout = QHBoxLayout()
 
-        # 添加悬浮的粘贴按钮
-        paste_button = ttk.Button(drop_frame, text="粘贴", command=self.paste_from_clipboard)
-        paste_button.place(relx=1.0, rely=1.0, anchor='se', x=-5, y=-5)
-        
-        # 创建一个框架来容纳转换成功的Label和处理结果输出区域
-        self.result_frame = ttk.Frame(self, height=10)
-        self.result_frame.pack(pady=10, padx=10, fill='both', expand=True)
-        self.result_frame.pack_forget()
+        # 拖入区域
+        self.drag_in_label = SignalDragLabel("将前仿verdi中的信号拖入这里", self, is_drag_out=False)
+        self.drag_in_label.setToolTip("将前仿verdi中的信号拖入这里")
+        drag_layout.addWidget(self.drag_in_label)
 
-        # 添加处理结果输出区域
-        self.result_text = tk.Text(self.result_frame, height=10, wrap=tk.WORD)
-        self.result_text.pack(fill='both', expand=True)
+        # 拖出区域
+        self.drag_out_label = SignalDragLabel("将此处信号拖出到后仿verdi中", self, is_drag_out=True)
+        self.drag_out_label.setToolTip("将此处信号拖出到后仿verdi中")
+        drag_layout.addWidget(self.drag_out_label)
 
-        # 创建一个框架来容纳勾选框和按钮
-        self.control_frame = ttk.Frame(self.result_frame)
+        layout.addLayout(drag_layout)
 
-        # 添加自动复制复选框
-        self.auto_copy_var = tk.BooleanVar(value=False)  # 默认勾选
-        self.auto_copy_check = ttk.Checkbutton(self.control_frame, text="自动将结果放到剪贴板", variable=self.auto_copy_var, command=self.toggle_copy_button)
-        self.auto_copy_check.pack(side='left', padx=(0, 10))
+    def handle_drop(self, text, label):
+        if label == self.drag_in_label:
+            pre_signal = text
+            pre_tail = ""
+            if len(pre_signal) > 300:  # 如果输入信号超过300字符，则截断并添加省略号
+                pre_tail = " ..."
+            self.drag_in_label.setText(f"输入：\n{pre_signal[:300]}{pre_tail}")
 
-        # 添加复制按钮
-        self.copy_button = ttk.Button(self.control_frame, text="复制结果到剪贴板", command=self.copy_to_clipboard)
-        self.copy_button.pack(side='left')
-
-        # 将control_frame悬浮到result_text右下角
-        self.control_frame.place(relx=1.0, rely=1.0, anchor='se', x=-5, y=-5)
-
-        self.toggle_copy_button()
-
-    def paste_from_clipboard(self):
-        try:
-            clipboard_content = self.clipboard_get()
-        except tk.TclError:
-            clipboard_content = ""
-        if clipboard_content:
-            self.drop(type('Event', (), {'data': clipboard_content})())
-
-    def drop(self, event):
-        text = event.data
-        self.drop_label.config(text=f"拖入的信号: {text[:500]} ...")
-        
-        # 这里添加信号处理逻辑
-        self.processed_result = self.process_signal(text)
-        
-        self.result_text.delete('1.0', tk.END)
-        self.result_text.insert(tk.END, f"转换成功！将以下转换成的信号复制粘贴到后仿veridi中: \n{self.processed_result[:500]} ...")
-
-        # 显示控制框架
-        self.result_frame.pack(side='top', fill='x')
-        self.update_window_height()  # 更新窗口高度
-
-        if self.auto_copy_var.get():
-            self.copy_to_clipboard()
-
-        self.parent.master.save_config()
-
-    def update_window_height(self):
-        self.update_idletasks()  # 更新所有挂起的任务
-        self.drop_label.config(height=5)
-        # 自适应高度，确保不多出一截
-        # new_height = self.parent.master.winfo_height() + 200  # 200为额外的边距
-        new_height = 480
-        self.parent.master.geometry(f"{self.parent.master.winfo_width()}x{new_height}")  # 使用主窗口的 geometry 方法
+            post_signal = self.process_signal(text)
+            post_head = ""
+            post_tail = ""
+            if len(post_signal) > 300:  # 如果输出信号超过300字符，则截断并添加省略号
+                post_tail = " ..."
+            self.drag_out_label.setText(f"输出：\n{post_signal[:300]}{post_tail}")
+        elif label == self.drag_out_label:
+            # 这里可以添加拖出信号的处理逻辑
+            pass
 
     def process_signal(self, signal):
-        # 这里添加实际的信号处理逻辑
-        # 现在只是简单地返回原始信号
-        return signal
+        # 添加实际的信号处理逻辑
+        # 这里只是简单地返回原始信号，可以根据需求进行修改
+        post_signal = 'post ===> ' + signal
+        self.drag_out_label.set_drag_text(post_signal)
+        return post_signal
 
-    def copy_to_clipboard(self):
-        result = self.processed_result
-        self.clipboard_clear()
-        self.clipboard_append(result)
-        self.update()  # 刷新剪贴板
-
-    def toggle_copy_button(self):
-        if self.auto_copy_var.get():
-            self.copy_button.pack_forget()  # 隐藏复制按钮
-        else:
-            self.copy_button.pack(side='left')  # 显示复制按钮
-
-class WaveformMode(ttk.Frame):
-    def __init__(self, parent):
+class WaveformMode(QWidget):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
         self.create_widgets()
 
     def create_widgets(self):
-        tk.Label(self, text="波形模式: 配置参数并打开波形").pack(pady=10)
+        layout = QVBoxLayout(self)
+        instruction_label = QLabel(f"{WAVEFORM_MODE}: 配置参数并打开波形")
+        instruction_label.setWordWrap(True)
+        # 统一样式并增加 padding
+        instruction_label.setStyleSheet("""
+            QLabel {
+                font-weight: bold;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(instruction_label)
+ 
+        config_frame = QGroupBox("参数配置")
+        config_layout = QGridLayout(config_frame)
+        layout.addWidget(config_frame)
 
-        self.config_frame = ttk.LabelFrame(self, text="参数配置")
-        self.config_frame.pack(pady=10, padx=10, fill='x')
+        config_layout.addWidget(QLabel("前仿波形（.fsdb）文件路径:"), 0, 0)
+        self.pre_waveform_entry = QLineEdit(self)
+        self.pre_waveform_entry.setPlaceholderText("请输入前仿波形文件路径")
+        config_layout.addWidget(self.pre_waveform_entry, 0, 1)
+        browse_pre_waveform_button = QPushButton("浏览")
+        browse_pre_waveform_button.clicked.connect(self.browse_pre_waveform)
+        config_layout.addWidget(browse_pre_waveform_button, 0, 2)
 
-        # 前仿波形输入框
-        ttk.Label(self.config_frame, text="前仿波形:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
-        self.pre_waveform_entry = ttk.Entry(self.config_frame, width=55)
-        self.pre_waveform_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')  # 修改为 'ew'
-        ttk.Button(self.config_frame, text="浏览", command=self.browse_pre_waveform).grid(row=0, column=2, padx=5, pady=5)
+        config_layout.addWidget(QLabel("前仿信号（.rc）文件路径:"), 1, 0)
+        self.pre_signal_entry = QLineEdit(self)
+        self.pre_signal_entry.setPlaceholderText("请输入前仿信号文件路径")
+        config_layout.addWidget(self.pre_signal_entry, 1, 1)
+        browse_pre_signal_button = QPushButton("浏览")
+        browse_pre_signal_button.clicked.connect(self.browse_pre_signal)
+        config_layout.addWidget(browse_pre_signal_button, 1, 2)
 
-        # 前仿信号输入框
-        ttk.Label(self.config_frame, text="前仿信号:").grid(row=1, column=0, padx=5, pady=5, sticky='w')
-        self.pre_signal_entry = ttk.Entry(self.config_frame, width=55)
-        self.pre_signal_entry.grid(row=1, column=1, padx=5, pady=5, sticky='ew')  # 修改为 'ew'
-        ttk.Button(self.config_frame, text="浏览", command=self.browse_pre_signal).grid(row=1, column=2, padx=5, pady=5)
+        config_layout.addWidget(QLabel("后仿波形（.fsdb）文件路径:"), 2, 0)
+        self.post_waveform_entry = QLineEdit(self)
+        self.post_waveform_entry.setPlaceholderText("请输入后仿波形文件路径")
+        config_layout.addWidget(self.post_waveform_entry, 2, 1)
+        browse_post_waveform_button = QPushButton("浏览")
+        browse_post_waveform_button.clicked.connect(self.browse_post_waveform)
+        config_layout.addWidget(browse_post_waveform_button, 2, 2)
 
-        # 分隔线
-        ttk.Separator(self.config_frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=10)
-
-        # 后方波形输入框
-        ttk.Label(self.config_frame, text="后仿波形:").grid(row=3, column=0, padx=5, pady=5, sticky='w')
-        self.post_waveform_entry = ttk.Entry(self.config_frame, width=55)
-        self.post_waveform_entry.grid(row=3, column=1, padx=5, pady=5, sticky='ew')  # 修改为 'ew'
-        ttk.Button(self.config_frame, text="浏览", command=self.browse_post_waveform).grid(row=3, column=2, padx=5, pady=5)
-
-        tk.Button(self, text="打开波形", command=self.open_waveform).pack(pady=20)
+        open_waveform_button = QPushButton("打开波形")
+        open_waveform_button.clicked.connect(self.open_waveform)
+        open_waveform_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 10px;
+                font-size: 16px;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        layout.addWidget(open_waveform_button)
 
     def browse_pre_waveform(self):
-        file_path = filedialog.askopenfilename()
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择前仿波形文件")
         if file_path:
-            self.pre_waveform_entry.delete(0, tk.END)
-            self.pre_waveform_entry.insert(0, file_path)
+            self.pre_waveform_entry.setText(file_path)
 
     def browse_pre_signal(self):
-        file_path = filedialog.askopenfilename()
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择前仿信号文件")
         if file_path:
-            self.pre_signal_entry.delete(0, tk.END)
-            self.pre_signal_entry.insert(0, file_path)
+            self.pre_signal_entry.setText(file_path)
 
     def browse_post_waveform(self):
-        file_path = filedialog.askopenfilename()
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择后仿波形文件")
         if file_path:
-            self.post_waveform_entry.delete(0, tk.END)
-            self.post_waveform_entry.insert(0, file_path)
+            self.post_waveform_entry.setText(file_path)
 
     def open_waveform(self):
-        # 这里添加打开波形的逻辑
-        self.parent.master.save_config()
-        pass
+        logging.info("尝试打开波形")
+        pre_waveform = self.pre_waveform_entry.text()
+        pre_signal = self.pre_signal_entry.text()
+        post_waveform = self.post_waveform_entry.text()
 
-class MultiModeReceiver(TkinterDnD.Tk):
-    def __init__(self):
+        if not pre_waveform or not pre_signal or not post_waveform:
+            QMessageBox.warning(self, "输入错误", "请确保所有文件路径已填写。")
+            return
+
+        # 验证文件扩展名
+        if not pre_waveform.endswith('.fsdb') or not post_waveform.endswith('.fsdb') or not pre_signal.endswith('.rc'):
+            QMessageBox.warning(self, "格式错误", "文件格式不正确。请检查文件扩展名。")
+            return
+
+        # 验证文件是否可访问
+        for file_path in [pre_waveform, pre_signal, post_waveform]:
+            if not os.path.exists(file_path):
+                QMessageBox.warning(self, "文件不存在", f"文件不存在或无法访问: {file_path}")
+                return
+
+        self.parent.save_config()
+        QMessageBox.information(self, "成功", "波形已成功打开。")
+        logging.info("波形成功打开")
+        # 添加打开波形的逻辑
+
+class MultiModeReceiver(QMainWindow):
+    def __init__(self, config_file='config.ini'):
         super().__init__()
-        self.title("多功能接收窗口")
-        self.geometry("600x480")  # 初始窗口高度调整为480
-        self.config_file = 'config.ini'  # 配置文件路径
+        self.setWindowTitle("多功能接收窗口")
+        self.setGeometry(100, 100, 800, 390)
+        self.config_file = config_file
         self.create_widgets()
-        self.load_config()  # 加载配置
-
+        self.load_config()
+        # 连接选项卡变化信号
+        self.notebook.currentChanged.connect(self.on_tab_changed)
+    
     def create_widgets(self):
-        self.create_mapping_frame()
-        self.create_notebook()
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
 
-    def create_mapping_frame(self):
-        mapping_frame = ttk.LabelFrame(self, text="映射关系配置")
-        mapping_frame.pack(pady=10, padx=10, fill='x')
+        self.create_mapping_frame(layout)
+        self.create_notebook(layout)
 
-        # tcl 路径配置
-        ttk.Label(mapping_frame, text="tcl路径:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
-        self.path_entry = ttk.Entry(mapping_frame, width=40)
-        self.path_entry.grid(row=0, column=1, padx=5, pady=5, columnspan=2, sticky='we')
-        ttk.Button(mapping_frame, text="浏览文件夹", command=self.browse_path).grid(row=0, column=3, padx=5, pady=5)
-        ttk.Button(mapping_frame, text="浏览文件", command=self.browse_files).grid(row=0, column=4, padx=5, pady=5)
+    def create_mapping_frame(self, layout):
+        mapping_frame = QGroupBox("映射关系配置")
+        mapping_layout = QGridLayout(mapping_frame)
+        layout.addWidget(mapping_frame)
 
-        # hdl_path 前缀替换配置
-        self.prefix_var = tk.BooleanVar()
-        self.prefix_check = ttk.Checkbutton(mapping_frame, text="启用 hdl_path 前缀替换", variable=self.prefix_var, command=self.toggle_prefix_entries)
-        self.prefix_check.grid(row=1, column=0, columnspan=5, padx=5, pady=5, sticky='w')
+        mapping_layout.addWidget(QLabel("映射文件（.tcl）路径:"), 0, 0)
+        self.path_entry = QLineEdit(self)
+        self.path_entry.setPlaceholderText("请输入tcl文件夹或文件路径，多个文件用;隔开")
+        mapping_layout.addWidget(self.path_entry, 0, 1, 1, 3)
+        browse_path_button = QPushButton("浏览文件夹")
+        browse_path_button.clicked.connect(self.browse_path)
+        mapping_layout.addWidget(browse_path_button, 0, 4)
+        browse_files_button = QPushButton("浏览文件")
+        browse_files_button.clicked.connect(self.browse_files)
+        mapping_layout.addWidget(browse_files_button, 0, 5)
 
-        ttk.Label(mapping_frame, text="原始前缀:").grid(row=2, column=0, padx=5, pady=5, sticky='w')
-        self.original_prefix_entry = ttk.Entry(mapping_frame, state='disabled')
-        # self.original_prefix_entry.insert(0, original_prefix_entry_default)  # 默认文本
-        # self.original_prefix_entry.config(state='disabled')
-        self.original_prefix_entry.grid(row=2, column=1, columnspan=4, padx=5, pady=5, sticky='we')
+        self.prefix_var = QCheckBox("启用 hdl_path 前缀替换")
+        self.prefix_var.stateChanged.connect(self.toggle_prefix_entries)
+        mapping_layout.addWidget(self.prefix_var, 1, 0, 1, 6)
 
-        ttk.Label(mapping_frame, text="目标前缀:").grid(row=3, column=0, padx=5, pady=5, sticky='w')
-        self.target_prefix_entry = ttk.Entry(mapping_frame, state='disabled')
-        # self.target_prefix_entry.insert(0, target_prefix_entry_default)  # 默认文本
-        # self.target_prefix_entry.config(state='disabled')
-        self.target_prefix_entry.grid(row=3, column=1, columnspan=4, padx=5, pady=5, sticky='we')
+        mapping_layout.addWidget(QLabel("原始（前仿）前缀:"), 2, 0)
+        self.original_prefix_entry = QLineEdit(self)
+        self.original_prefix_entry.setPlaceholderText(original_prefix_entry_default)
+        self.original_prefix_entry.setDisabled(True)
+        mapping_layout.addWidget(self.original_prefix_entry, 2, 1, 1, 5)
 
-        # 配置列的权重,使其能够自适应调整大小
-        mapping_frame.columnconfigure(1, weight=1)
-        mapping_frame.columnconfigure(3, weight=1)
-
-        # 添加保存按钮
-        # ttk.Button(mapping_frame, text="保存配置", command=self.save_config).grid(row=0, column=5, padx=5, pady=5)
+        mapping_layout.addWidget(QLabel("目标（后仿）前缀:"), 3, 0)
+        self.target_prefix_entry = QLineEdit(self)
+        self.target_prefix_entry.setPlaceholderText(target_prefix_entry_default)
+        self.target_prefix_entry.setDisabled(True)
+        mapping_layout.addWidget(self.target_prefix_entry, 3, 1, 1, 5)
 
     def toggle_prefix_entries(self):
-        state = 'normal' if self.prefix_var.get() else 'disabled'
-        self.original_prefix_entry.config(state=state)
-        self.target_prefix_entry.config(state=state)
+        state = not self.original_prefix_entry.isEnabled()
+        self.original_prefix_entry.setEnabled(state)
+        self.target_prefix_entry.setEnabled(state)
 
-    def create_notebook(self):
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill='both', expand=True)
+    def create_notebook(self, layout):
+        self.notebook = QTabWidget(self)
+        layout.addWidget(self.notebook)
 
-        self.signal_drag_mode = SignalDragMode(self.notebook)
-        self.waveform_mode = WaveformMode(self.notebook)
+        self.signal_drag_mode = SignalDragMode(self)
+        self.waveform_mode = WaveformMode(self)
 
-        self.notebook.add(self.signal_drag_mode, text='信号拖拽模式')
-        self.notebook.add(self.waveform_mode, text='波形模式')
+        self.notebook.addTab(self.waveform_mode, WAVEFORM_MODE)
+        self.notebook.addTab(self.signal_drag_mode, SIGNAL_DRAG_MODE)
 
     def browse_path(self):
-        path = filedialog.askdirectory()
+        path = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if path:
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, path)
+            self.path_entry.setText(path)
 
     def browse_files(self):
-        files = filedialog.askopenfilenames()
+        files, _ = QFileDialog.getOpenFileNames(self, "选择文件")
         if files:
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, ';'.join(files))
+            self.path_entry.setText(';'.join(files))
 
     def load_config(self):
         config = configparser.ConfigParser()
         config.read(self.config_file)
         if 'Settings' in config:
-            self.path_entry.insert(0, config.get('Settings', 'tcl_path', fallback=''))
-            # 读取其他Entry的值并填入
-            self.waveform_mode.pre_waveform_entry.insert(0, config.get('Settings', 'pre_waveform', fallback=''))
-            self.waveform_mode.pre_signal_entry.insert(0, config.get('Settings', 'pre_signal', fallback=''))
-            self.waveform_mode.post_waveform_entry.insert(0, config.get('Settings', 'post_waveform', fallback=''))
-            # 读取 hdl_path 前缀替换配置
-            self.prefix_var.set(config.getboolean('Settings', 'enable_hdl_path_prefix', fallback=False))  # 读取复选框状态
-        self.original_prefix_entry.config(state='normal')
-        self.original_prefix_entry.delete(0, tk.END)  # 删除从第一个字符到最后一个字符的内容
-        self.original_prefix_entry.insert(0, config.get('Settings', 'original_prefix', fallback=original_prefix_entry_default))  # 读取原始前缀
-        self.original_prefix_entry.config(state='disabled')
-        self.target_prefix_entry.config(state='normal')
-        self.target_prefix_entry.delete(0, tk.END)  # 删除从第一个字符到最后一个字符的内容
-        self.target_prefix_entry.insert(0, config.get('Settings', 'target_prefix', fallback=target_prefix_entry_default))  # 读取目标前缀
-        self.target_prefix_entry.config(state='disabled')
-        self.toggle_prefix_entries()
-
+            self.path_entry.setText(config.get('Settings', 'tcl_path', fallback=''))
+            self.waveform_mode.pre_waveform_entry.setText(config.get('Settings', 'pre_waveform', fallback=''))
+            self.waveform_mode.pre_signal_entry.setText(config.get('Settings', 'pre_signal', fallback=''))
+            self.waveform_mode.post_waveform_entry.setText(config.get('Settings', 'post_waveform', fallback=''))
+            self.prefix_var.setChecked(config.getboolean('Settings', 'enable_hdl_path_prefix', fallback=False))
+            self.original_prefix_entry.setText(config.get('Settings', 'original_prefix', fallback=original_prefix_entry_default))
+            self.target_prefix_entry.setText(config.get('Settings', 'target_prefix', fallback=target_prefix_entry_default))
+        # self.toggle_prefix_entries()
+    
     def save_config(self):
         config = configparser.ConfigParser()
         config['Settings'] = {
-            'tcl_path': self.path_entry.get(),
-            'pre_waveform': self.waveform_mode.pre_waveform_entry.get(),
-            'pre_signal': self.waveform_mode.pre_signal_entry.get(),
-            'post_waveform': self.waveform_mode.post_waveform_entry.get(),
-            'enable_hdl_path_prefix': self.prefix_var.get(),  # 保存复选框状态
-            'original_prefix': self.original_prefix_entry.get(),  # 保存原始前缀
-            'target_prefix': self.target_prefix_entry.get(),  # 保存目标前缀
+            'tcl_path': self.path_entry.text(),
+            'pre_waveform': self.waveform_mode.pre_waveform_entry.text(),
+            'pre_signal': self.waveform_mode.pre_signal_entry.text(),
+            'post_waveform': self.waveform_mode.post_waveform_entry.text(),
+            'enable_hdl_path_prefix': self.prefix_var.isChecked(),
+            'original_prefix': self.original_prefix_entry.text(),
+            'target_prefix': self.target_prefix_entry.text(),
         }
         with open(self.config_file, 'w') as configfile:
             config.write(configfile)
+    
+    def on_tab_changed(self, index):
+        current_tab = self.notebook.tabText(index)
+        if current_tab == SIGNAL_DRAG_MODE:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
+        self.show()
+
+def main():
+    parser = argparse.ArgumentParser(description="多功能接收窗口")
+    parser.add_argument('--config', type=str, default='config.ini', help='配置文件路径')
+    args = parser.parse_args()
+
+    app = QApplication(sys.argv)
+    main_window = MultiModeReceiver(config_file=args.config)
+    main_window.show()
+    sys.exit(app.exec_())
 
 if __name__ == "__main__":
-    app = MultiModeReceiver()
-    app.mainloop()
+    main()
